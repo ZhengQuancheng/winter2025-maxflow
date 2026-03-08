@@ -1,5 +1,50 @@
-// Compile: nvcc -O3 -std=c++17 -arch=native gpu_maxflow.cu -o gpu_maxflow
 // Usage: ./gpu_maxflow <graph.bin> <query.txt> <output.txt>
+
+#if defined(PLATFORM_NVIDIA) || defined(PLATFORM_ILUVATAR)
+#include <cuda_runtime.h>
+#define GPUError_t cudaError_t
+#define GPUSuccess cudaSuccess
+#define GPUGetErrorString cudaGetErrorString
+#define GPUMalloc cudaMalloc
+#define GPUMemcpy cudaMemcpy
+#define GPUFree cudaFree
+#define GPUMallocHost cudaMallocHost
+#define GPUFreeHost cudaFreeHost
+#define GPUMemcpyAsync cudaMemcpyAsync
+#define GPUStream_t cudaStream_t
+#define GPUStreamCreate cudaStreamCreate
+#define GPUStreamDestroy cudaStreamDestroy
+#define GPUStreamSynchronize cudaStreamSynchronize
+#define GPUMemsetAsync cudaMemsetAsync
+#define GPUGetDeviceProperties cudaGetDeviceProperties
+#define GPUMemcpyHostToDevice cudaMemcpyHostToDevice
+#define GPUMemcpyDeviceToHost cudaMemcpyDeviceToHost
+#define GPUDeviceProp cudaDeviceProp
+
+#elif defined(PLATFORM_METAX)
+#include <mc_runtime.h>
+#define GPUError_t mcError_t
+#define GPUSuccess mcSuccess
+#define GPUGetErrorString mcGetErrorString
+#define GPUMalloc mcMalloc
+#define GPUMemcpy mcMemcpy
+#define GPUFree mcFree
+#define GPUMallocHost mcMallocHost
+#define GPUFreeHost mcFreeHost
+#define GPUMemcpyAsync mcMemcpyAsync
+#define GPUStream_t mcStream_t
+#define GPUStreamCreate mcStreamCreate
+#define GPUStreamDestroy mcStreamDestroy
+#define GPUStreamSynchronize mcStreamSynchronize
+#define GPUMemsetAsync mcMemsetAsync
+#define GPUGetDeviceProperties mcGetDeviceProperties
+#define GPUMemcpyHostToDevice mcMemcpyHostToDevice
+#define GPUMemcpyDeviceToHost mcMemcpyDeviceToHost
+#define GPUDeviceProp mcDeviceProp_t
+
+#else
+
+#endif
 
 #include <cstdint>
 #include <cstdio>
@@ -14,13 +59,12 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
-#include <cuda_runtime.h>
 
-#define CUDA_CHECK(call) do { \
-    cudaError_t _e = (call); \
-    if (_e != cudaSuccess) { \
-        fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__, \
-                cudaGetErrorString(_e)); \
+#define RUNTIME_CHECK(call) do { \
+    GPUError_t _e = (call); \
+    if (_e != GPUSuccess) { \
+        fprintf(stderr, "Error %s:%d: %s\n", __FILE__, __LINE__, \
+                GPUGetErrorString(_e)); \
         exit(1); \
     } \
 } while(0)
@@ -183,14 +227,14 @@ struct DeviceGraph {
  */
 void upload_graph(const GraphCSR& rg, DeviceGraph& dg) {
     dg.V = rg.V;  dg.E = rg.E;
-    CUDA_CHECK(cudaMalloc(&dg.d_row, (rg.V + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&dg.d_col, rg.E * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&dg.d_rev, rg.E * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&dg.d_cap, rg.E * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(dg.d_row, rg.row.data(), (rg.V+1)*sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dg.d_col, rg.col.data(), rg.E*sizeof(int),     cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dg.d_rev, rg.rev.data(), rg.E*sizeof(int),     cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dg.d_cap, rg.cap.data(), rg.E*sizeof(float),   cudaMemcpyHostToDevice));
+    RUNTIME_CHECK(GPUMalloc(&dg.d_row, (rg.V + 1) * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&dg.d_col, rg.E * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&dg.d_rev, rg.E * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&dg.d_cap, rg.E * sizeof(float)));
+    RUNTIME_CHECK(GPUMemcpy(dg.d_row, rg.row.data(), (rg.V+1)*sizeof(int), GPUMemcpyHostToDevice));
+    RUNTIME_CHECK(GPUMemcpy(dg.d_col, rg.col.data(), rg.E*sizeof(int),     GPUMemcpyHostToDevice));
+    RUNTIME_CHECK(GPUMemcpy(dg.d_rev, rg.rev.data(), rg.E*sizeof(int),     GPUMemcpyHostToDevice));
+    RUNTIME_CHECK(GPUMemcpy(dg.d_cap, rg.cap.data(), rg.E*sizeof(float),   GPUMemcpyHostToDevice));
 }
 
 /**
@@ -576,7 +620,7 @@ struct WorkBuffer {
     int   *fa, *fb; // BFS 前沿队列 A 和 B (大小 V, 双缓冲)
     int   *fsz;     // 前沿队列大小
     unsigned *max_bits;   // 最大盈余的位表示
-    cudaStream_t stream; // CUDA 流
+    GPUStream_t stream; // CUDA 流
 };
 
 static inline int grid_dim(int n) { return (n + BLK - 1) / BLK; }
@@ -597,7 +641,7 @@ static inline int grid_dim(int n) { return (n + BLK - 1) / BLK; }
  */
 void global_relabel(int V, int s, int t,
     const DeviceGraph& dg, float* d_cap, int* d_ht,
-    int* fa, int* fb, int* fsz, int* h_fsz, cudaStream_t stream)
+    int* fa, int* fb, int* fsz, int* h_fsz, GPUStream_t stream)
 {
     // 设置高度和初始前沿队列
     kernel_bfs_init<<<grid_dim(V), BLK, 0, stream>>>(V, s, t, d_ht, fa, fsz);
@@ -606,10 +650,10 @@ void global_relabel(int V, int s, int t,
 
     // Phase 1: 从 t 开始反向 BFS, 设置所有能到达 t 的节点的高度
     for (int lv = 0; lv < V; ++lv) {
-        CUDA_CHECK(cudaMemcpyAsync(h_fsz, fsz, sizeof(int), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        RUNTIME_CHECK(GPUMemcpyAsync(h_fsz, fsz, sizeof(int), GPUMemcpyDeviceToHost, stream));
+        RUNTIME_CHECK(GPUStreamSynchronize(stream));
         if (*h_fsz == 0) break;
-        CUDA_CHECK(cudaMemsetAsync(fsz, 0, sizeof(int), stream));
+        RUNTIME_CHECK(GPUMemsetAsync(fsz, 0, sizeof(int), stream));
         kernel_bfs_backward<<<grid_dim(*h_fsz), BLK, 0, stream>>>(
             *h_fsz, cur, nxt, fsz,
             dg.d_row, dg.d_col, dg.d_rev, d_cap, d_ht, lv, V);
@@ -619,16 +663,16 @@ void global_relabel(int V, int s, int t,
 
     // Phase 2: 从 s 开始正向 BFS, 设置"可从 s 到达但无法到达 t"节点的高度
     // 重置前沿队列: 将源点 s 作为起点
-    CUDA_CHECK(cudaMemsetAsync(fsz, 0, sizeof(int), stream));
-    CUDA_CHECK(cudaMemcpyAsync(cur, &s, sizeof(int), cudaMemcpyHostToDevice, stream));
+    RUNTIME_CHECK(GPUMemsetAsync(fsz, 0, sizeof(int), stream));
+    RUNTIME_CHECK(GPUMemcpyAsync(cur, &s, sizeof(int), GPUMemcpyHostToDevice, stream));
     int one = 1;
-    CUDA_CHECK(cudaMemcpyAsync(fsz, &one, sizeof(int), cudaMemcpyHostToDevice, stream));
+    RUNTIME_CHECK(GPUMemcpyAsync(fsz, &one, sizeof(int), GPUMemcpyHostToDevice, stream));
 
     for (int lv = V; lv < 2 * V; ++lv) {
-        CUDA_CHECK(cudaMemcpyAsync(h_fsz, fsz, sizeof(int), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        RUNTIME_CHECK(GPUMemcpyAsync(h_fsz, fsz, sizeof(int), GPUMemcpyDeviceToHost, stream));
+        RUNTIME_CHECK(GPUStreamSynchronize(stream));
         if (*h_fsz == 0) break;
-        CUDA_CHECK(cudaMemsetAsync(fsz, 0, sizeof(int), stream));
+        RUNTIME_CHECK(GPUMemsetAsync(fsz, 0, sizeof(int), stream));
         kernel_bfs_forward<<<grid_dim(*h_fsz), BLK, 0, stream>>>(
             *h_fsz, cur, nxt, fsz,
             dg.d_row, dg.d_col, d_cap, d_ht, lv, V);
@@ -654,7 +698,7 @@ float solve(const DeviceGraph& dg,
     if (s == t) { if (out_iters) *out_iters = 0; return 0.0f; }
 
     const int V = dg.V, E = dg.E;
-    cudaStream_t stream = w.stream;
+    GPUStream_t stream = w.stream;
 
     // 重置残余容量 (从原始容量拷贝)
     kernel_reset_cap<<<grid_dim(E), BLK, 0, stream>>>(E, dg.d_cap, w.cap);
@@ -675,7 +719,7 @@ float solve(const DeviceGraph& dg,
 
     while (iters < MAX_ITERS) {
         // 工作标志清零
-        CUDA_CHECK(cudaMemsetAsync(w.flag, 0, sizeof(int), stream));
+        RUNTIME_CHECK(GPUMemsetAsync(w.flag, 0, sizeof(int), stream));
         // 执行 CHECK 轮 discharge 操作, 期间每 GR_FREQ 轮执行一次全局重标号
         for (int check = 0; check < CHECK_FREQ && iters < MAX_ITERS; ++check, ++iters) {
             // 周期性全局重标号
@@ -689,8 +733,8 @@ float solve(const DeviceGraph& dg,
         }
 
         // 进度检查: 是否有节点执行了 push/relabel
-        CUDA_CHECK(cudaMemcpyAsync(p.flag, w.flag, sizeof(int), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        RUNTIME_CHECK(GPUMemcpyAsync(p.flag, w.flag, sizeof(int), GPUMemcpyDeviceToHost, stream));
+        RUNTIME_CHECK(GPUStreamSynchronize(stream));
         // 如果存在有效工作, 重置 stall 计数器并继续
         if (*p.flag) {
             stall = 0;
@@ -700,13 +744,13 @@ float solve(const DeviceGraph& dg,
         // 无工作完成, 检查是否真正收敛
         ++stall; // 增加 stall 计数
         // 计算最大盈余 (用于收敛判断)
-        CUDA_CHECK(cudaMemsetAsync(w.max_bits, 0, sizeof(unsigned), stream));
+        RUNTIME_CHECK(GPUMemsetAsync(w.max_bits, 0, sizeof(unsigned), stream));
         kernel_max_excess<<<grid_dim(V), BLK, 0, stream>>>(
             V, s, t, w.excess, w.height, w.max_bits);
         // 异步拷贝最大盈余到主机
-        CUDA_CHECK(cudaMemcpyAsync(p.max_bits, w.max_bits, sizeof(unsigned),
-                                   cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        RUNTIME_CHECK(GPUMemcpyAsync(p.max_bits, w.max_bits, sizeof(unsigned),
+                                   GPUMemcpyDeviceToHost, stream));
+        RUNTIME_CHECK(GPUStreamSynchronize(stream));
         // 将 unsigned 位表示转换回 float
         float max_ex;
         memcpy(&max_ex, p.max_bits, sizeof(float));
@@ -723,7 +767,7 @@ float solve(const DeviceGraph& dg,
 
     // 读取最终流量并返回
     float flow;
-    CUDA_CHECK(cudaMemcpy(&flow, w.excess + t, sizeof(float), cudaMemcpyDeviceToHost));
+    RUNTIME_CHECK(GPUMemcpy(&flow, w.excess + t, sizeof(float), GPUMemcpyDeviceToHost));
     // 输出迭代次数
     if (out_iters) *out_iters = iters;
 
@@ -768,8 +812,8 @@ int main(int argc, char** argv) {
     }
 
     // 查询并打印当前 GPU 设备信息
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    GPUDeviceProp prop;
+    RUNTIME_CHECK(GPUGetDeviceProperties(&prop, 0));
     printf("Device: %s (SM %d.%d)\n", prop.name, prop.major, prop.minor);
 
     // 读取原始图, 并构建残量图
@@ -787,21 +831,21 @@ int main(int argc, char** argv) {
 
     // 分配 GPU 工作缓冲区
     WorkBuffer w;
-    CUDA_CHECK(cudaStreamCreate(&w.stream));
-    CUDA_CHECK(cudaMalloc(&w.cap,    rg.E * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&w.excess, rg.V * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&w.height, rg.V * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&w.flag,   sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&w.fa,     rg.V * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&w.fb,     rg.V * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&w.fsz,    sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&w.max_bits,     sizeof(unsigned)));
+    RUNTIME_CHECK(GPUStreamCreate(&w.stream));
+    RUNTIME_CHECK(GPUMalloc(&w.cap,    rg.E * sizeof(float)));
+    RUNTIME_CHECK(GPUMalloc(&w.excess, rg.V * sizeof(float)));
+    RUNTIME_CHECK(GPUMalloc(&w.height, rg.V * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.flag,   sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fa,     rg.V * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fb,     rg.V * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fsz,    sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.max_bits,     sizeof(unsigned)));
 
     // 分配主机侧 pinned memory, 用于和 GPU 异步交换少量控制信息
     PinnedBuffer p;
-    CUDA_CHECK(cudaMallocHost(&p.flag, sizeof(int)));
-    CUDA_CHECK(cudaMallocHost(&p.fsz,  sizeof(int)));
-    CUDA_CHECK(cudaMallocHost(&p.max_bits,   sizeof(unsigned)));
+    RUNTIME_CHECK(GPUMallocHost(&p.flag, sizeof(int)));
+    RUNTIME_CHECK(GPUMallocHost(&p.fsz,  sizeof(int)));
+    RUNTIME_CHECK(GPUMallocHost(&p.max_bits,   sizeof(unsigned)));
 
     // 读取所有查询对
     std::vector<std::pair<int,int>> queries;
@@ -841,25 +885,25 @@ int main(int argc, char** argv) {
     printf("  Iter Count   : %lld\n", total_iters);
 
     // 释放 GPU 资源
-    cudaFree(w.cap);
-    cudaFree(w.excess);
-    cudaFree(w.height);
-    cudaFree(w.flag);
-    cudaFree(w.fa);
-    cudaFree(w.fb);
-    cudaFree(w.fsz);
-    cudaFree(w.max_bits);
+    RUNTIME_CHECK(GPUFree(w.cap));
+    RUNTIME_CHECK(GPUFree(w.excess));
+    RUNTIME_CHECK(GPUFree(w.height));
+    RUNTIME_CHECK(GPUFree(w.flag));
+    RUNTIME_CHECK(GPUFree(w.fa));
+    RUNTIME_CHECK(GPUFree(w.fb));
+    RUNTIME_CHECK(GPUFree(w.fsz));
+    RUNTIME_CHECK(GPUFree(w.max_bits));
 
-    cudaFreeHost(p.flag);
-    cudaFreeHost(p.fsz);
-    cudaFreeHost(p.max_bits);
+    RUNTIME_CHECK(GPUFreeHost(p.flag));
+    RUNTIME_CHECK(GPUFreeHost(p.fsz));
+    RUNTIME_CHECK(GPUFreeHost(p.max_bits));
 
-    cudaStreamDestroy(w.stream);
+    RUNTIME_CHECK(GPUStreamDestroy(w.stream));
 
-    cudaFree(dg.d_row);
-    cudaFree(dg.d_col);
-    cudaFree(dg.d_rev);
-    cudaFree(dg.d_cap);
+    RUNTIME_CHECK(GPUFree(dg.d_row));
+    RUNTIME_CHECK(GPUFree(dg.d_col));
+    RUNTIME_CHECK(GPUFree(dg.d_rev));
+    RUNTIME_CHECK(GPUFree(dg.d_cap));
 
     return 0;
 }

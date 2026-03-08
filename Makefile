@@ -1,7 +1,20 @@
 CXX       = g++
 NVCC      = nvcc
+MXCC      = mxcc
 CXXFLAGS  = -O2 -std=c++17
-NVCCFLAGS = -O3 -std=c++17 -arch=native
+NVCCFLAGS = -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
+MXCCFLAGS = -O3 -std=c++17 -DPLATFORM_METAX
+
+PLATFORM  ?= NVIDIA
+GPUCC  	  ?= $(NVCC)
+GPUFLAGS  ?= $(NVCCFLAGS)
+ifeq ($(PLATFORM),NVIDIA)
+	GPUCC = $(NVCC)
+	GPUFLAGS = $(NVCCFLAGS)
+else ifeq ($(PLATFORM),METAX)
+	GPUCC = $(MXCC)
+	GPUFLAGS = $(MXCCFLAGS)
+endif
 
 BINS = gen_graph cpu_maxflow gpu_maxflow check_results
 
@@ -13,7 +26,7 @@ gen_graph cpu_maxflow check_results: %: %.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
 gpu_maxflow: gpu_maxflow.cu
-	$(NVCC) $(NVCCFLAGS) -o $@ $<
+	$(GPUCC) $(GPUFLAGS) -o $@ $<
 
 define run_test
 	@echo "=== Test: $(1) (N=$(2), M=$(3)) ==="
