@@ -1,0 +1,6 @@
+gen_graph
+cpu_maxflow
+gpu_maxflow
+check_results
+*.txt
+*.bin
