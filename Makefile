@@ -1,24 +1,22 @@
 CXX       = g++
-NVCC      = nvcc
-MXCC      = mxcc
 MCC       = mcc
 CXXFLAGS  = -O2 -std=c++17
-NVCCFLAGS = -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
-MXCCFLAGS = -O3 -std=c++17 -DPLATFORM_METAX
-MCCFLAGS  = -O3 -std=c++17 -lmusart -DPLATFORM_MOORE
 
 PLATFORM  ?= NVIDIA
-GPUCC  	  ?= $(NVCC)
-GPUFLAGS  ?= $(NVCCFLAGS)
+GPUCC  	  ?= nvcc
+GPUFLAGS  ?= -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
 ifeq ($(PLATFORM),NVIDIA)
-	GPUCC = $(NVCC)
-	GPUFLAGS = $(NVCCFLAGS)
+	GPUCC = nvcc
+	GPUFLAGS = -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
 else ifeq ($(PLATFORM),METAX)
-	GPUCC = $(MXCC)
-	GPUFLAGS = $(MXCCFLAGS)
+	GPUCC = mxcc
+	GPUFLAGS = -O3 -std=c++17 -DPLATFORM_METAX
 else ifeq ($(PLATFORM),MOORE)
-	GPUCC = $(MCC)
-	GPUFLAGS = $(MCCFLAGS)
+	GPUCC = mcc
+	GPUFLAGS = -O3 -std=c++17 -lmusart -DPLATFORM_MOORE
+else ifeq ($(PLATFORM),HYGON)
+	GPUCC = hipcc
+	GPUFLAGS = -O3 -std=c++17 -DPLATFORM_HYGON
 endif
 
 BINS = gen_graph cpu_maxflow gpu_maxflow check_results

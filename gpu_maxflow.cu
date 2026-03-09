@@ -63,6 +63,27 @@
 #define GPUMemcpyDeviceToHost musaMemcpyDeviceToHost
 #define GPUDeviceProp musaDeviceProp
 
+#elif defined(PLATFORM_HYGON)
+#include <hip/hip_runtime.h>
+#define GPUError_t hipError_t
+#define GPUSuccess hipSuccess
+#define GPUGetErrorString hipGetErrorString
+#define GPUMalloc hipMalloc
+#define GPUMemcpy hipMemcpy
+#define GPUFree hipFree
+#define GPUMallocHost hipHostMalloc
+#define GPUFreeHost hipHostFree
+#define GPUMemcpyAsync hipMemcpyAsync
+#define GPUStream_t hipStream_t
+#define GPUStreamCreate hipStreamCreate
+#define GPUStreamDestroy hipStreamDestroy
+#define GPUStreamSynchronize hipStreamSynchronize
+#define GPUMemsetAsync hipMemsetAsync
+#define GPUGetDeviceProperties hipGetDeviceProperties
+#define GPUMemcpyHostToDevice hipMemcpyHostToDevice
+#define GPUMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define GPUDeviceProp hipDeviceProp_t
+
 #else
 
 #endif
@@ -578,10 +599,15 @@ __global__ void kernel_bfs_forward(
  * @param value 每个线程提供一个 float 类型的输入值
  * @return 返回 warp 内所有线程输入值的最大值
  */
-__device__ __forceinline__ float warp_reduce_max(float value) {
-    for (int offset = 16; offset > 0; offset >>= 1)
-        value = fmaxf(value, __shfl_down_sync(0xffffffff, value, offset));
-    return value;
+__device__ __forceinline__ float warp_reduce_max(float v) {
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+    #if defined(PLATFORM_HYGON)
+        v = fmaxf(v, __shfl_down(v, offset));
+    #else
+        v = fmaxf(v, __shfl_down_sync(0xffffffff, v, offset));
+    #endif
+    }
+    return v;
 }
 
 /**
@@ -615,7 +641,7 @@ __global__ void kernel_max_excess(
     // Warp 内归约, 计算每个 Warp 内的最大值
     max_val = warp_reduce_max(max_val);
     // 每个 warp 的第一个线程执行原子操作, 将其最大值与全局最大值进行比较并更新
-    if ((threadIdx.x & 31) == 0) {
+    if (threadIdx.x % warpSize == 0) {
         unsigned bits = __float_as_uint(max_val);
         if (bits) atomicMax(d_max_bits, bits);
     }
