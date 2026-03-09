@@ -42,6 +42,27 @@
 #define GPUMemcpyDeviceToHost mcMemcpyDeviceToHost
 #define GPUDeviceProp mcDeviceProp_t
 
+#elif defined(PLATFORM_MOORE)
+#include <musa_runtime.h>
+#define GPUError_t musaError_t
+#define GPUSuccess musaSuccess
+#define GPUGetErrorString musaGetErrorString
+#define GPUMalloc musaMalloc
+#define GPUMemcpy musaMemcpy
+#define GPUFree musaFree
+#define GPUMallocHost musaMallocHost
+#define GPUFreeHost musaFreeHost
+#define GPUMemcpyAsync musaMemcpyAsync
+#define GPUStream_t musaStream_t
+#define GPUStreamCreate musaStreamCreate
+#define GPUStreamDestroy musaStreamDestroy
+#define GPUStreamSynchronize musaStreamSynchronize
+#define GPUMemsetAsync musaMemsetAsync
+#define GPUGetDeviceProperties musaGetDeviceProperties
+#define GPUMemcpyHostToDevice musaMemcpyHostToDevice
+#define GPUMemcpyDeviceToHost musaMemcpyDeviceToHost
+#define GPUDeviceProp musaDeviceProp
+
 #else
 
 #endif
