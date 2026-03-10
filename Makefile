@@ -8,6 +8,9 @@ GPUFLAGS  ?= -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
 ifeq ($(PLATFORM),NVIDIA)
 	GPUCC = nvcc
 	GPUFLAGS = -O3 -std=c++17 -arch=native -DPLATFORM_NVIDIA
+else ifeq ($(PLATFORM),ILUVATAR)
+	GPUCC = clang++
+	GPUFLAGS = -O3 -std=c++17 -DPLATFORM_ILUVATAR -lcudart -I/usr/local/corex/include -L/usr/local/corex/lib64 -fPIC
 else ifeq ($(PLATFORM),METAX)
 	GPUCC = mxcc
 	GPUFLAGS = -O3 -std=c++17 -DPLATFORM_METAX

@@ -356,10 +356,10 @@ __global__ void kernel_saturate_source(
     const int* __restrict__ d_col,
     const int* __restrict__ d_rev,
     float* cap, float* excess,
-    unsigned long long* edge_updates)
+    unsigned* edge_updates)
 {
     // 局部边更新次数计数器, 记录当前线程执行的边更新次数 (每次成功推送都会更新两条边: 正向边和反向边)
-    unsigned long long local_edge_updates = 0;
+    unsigned local_edge_updates = 0;
     // 每个线程处理源点 s 的一部分出边
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -410,10 +410,10 @@ __global__ void kernel_discharge(
     const int* __restrict__ d_rev,
     float* cap, float* excess,
     int* height, int* flag,
-    unsigned long long* edge_updates)
+    unsigned* edge_updates)
 {
     // 局部边更新次数计数器, 记录当前线程执行的边更新次数
-    unsigned long long local_edge_updates = 0;
+    unsigned local_edge_updates = 0;
 
     // 当前线程负责处理的节点编号 u
     int u = blockIdx.x * blockDim.x + threadIdx.x;
@@ -676,7 +676,7 @@ struct PinnedBuffer {
     int *flag;          // 标志位: 是否有节点执行了 push/relabel
     int *fsz;           // BFS 前沿队列大小
     unsigned *max_bits; // 最大盈余的位表示
-    unsigned long long *edge_updates; // 主机端统计: 边更新次数
+    unsigned *edge_updates; // 主机端统计: 边更新次数
 };
 
 /**
@@ -690,7 +690,7 @@ struct WorkBuffer {
     int   *fa, *fb; // BFS 前沿队列 A 和 B (大小 V, 双缓冲)
     int   *fsz;     // 前沿队列大小
     unsigned *max_bits;                 // 最大盈余的位表示
-    unsigned long long *edge_updates;   // 设备端统计: 边更新次数
+    unsigned *edge_updates;   // 设备端统计: 边更新次数
     GPUStream_t stream;                 // CUDA 流
 };
 
@@ -766,7 +766,7 @@ void global_relabel(int V, int s, int t,
 float solve(const DeviceGraph& dg,
             WorkBuffer& w, PinnedBuffer& p,
             int s, int t, int* out_iters,
-            unsigned long long* out_edge_updates)
+            unsigned* out_edge_updates)
 {
     if (s == t) {
         if (out_iters) *out_iters = 0;
@@ -777,7 +777,7 @@ float solve(const DeviceGraph& dg,
     const int V = dg.V, E = dg.E;
     GPUStream_t stream = w.stream;
     // 清零边更新计数器
-    RUNTIME_CHECK(GPUMemsetAsync(w.edge_updates, 0, sizeof(unsigned long long), stream));
+    RUNTIME_CHECK(GPUMemsetAsync(w.edge_updates, 0, sizeof(unsigned), stream));
     // 重置残余容量 (从原始容量拷贝)
     kernel_reset_cap<<<grid_dim(E), BLK, 0, stream>>>(E, dg.d_cap, w.cap);
     // 初始化节点状态 (excess=0; height=0 except s, h[s] = V)
@@ -847,7 +847,7 @@ float solve(const DeviceGraph& dg,
     float flow;
     RUNTIME_CHECK(GPUMemcpyAsync(&flow, w.excess + t, sizeof(float), GPUMemcpyDeviceToHost, stream));
     // 读取边更新次数
-    RUNTIME_CHECK(GPUMemcpyAsync(p.edge_updates, w.edge_updates, sizeof(unsigned long long), GPUMemcpyDeviceToHost, stream));
+    RUNTIME_CHECK(GPUMemcpyAsync(p.edge_updates, w.edge_updates, sizeof(unsigned), GPUMemcpyDeviceToHost, stream));
     // 同步 stream
     RUNTIME_CHECK(GPUStreamSynchronize(stream));
     // 输出迭代次数
@@ -923,14 +923,14 @@ int main(int argc, char** argv) {
     RUNTIME_CHECK(GPUMalloc(&w.fb, rg.V * sizeof(int)));
     RUNTIME_CHECK(GPUMalloc(&w.fsz, sizeof(int)));
     RUNTIME_CHECK(GPUMalloc(&w.max_bits, sizeof(unsigned)));
-    RUNTIME_CHECK(GPUMalloc(&w.edge_updates, sizeof(unsigned long long)));
+    RUNTIME_CHECK(GPUMalloc(&w.edge_updates, sizeof(unsigned)));
 
     // 分配主机侧 pinned memory, 用于和 GPU 异步交换少量控制信息
     PinnedBuffer p = { };
     RUNTIME_CHECK(GPUMallocHost(&p.flag, sizeof(int)));
     RUNTIME_CHECK(GPUMallocHost(&p.fsz, sizeof(int)));
     RUNTIME_CHECK(GPUMallocHost(&p.max_bits, sizeof(unsigned)));
-    RUNTIME_CHECK(GPUMallocHost(&p.edge_updates, sizeof(unsigned long long)));
+    RUNTIME_CHECK(GPUMallocHost(&p.edge_updates, sizeof(unsigned)));
 
     // 读取所有查询对
     std::vector<std::pair<int,int>> queries;
@@ -943,11 +943,11 @@ int main(int argc, char** argv) {
 
     auto T0 = std::chrono::high_resolution_clock::now();
     long long total_iters = 0;
-    unsigned long long total_edge_updates = 0;
+    unsigned total_edge_updates = 0;
 
     for (size_t i = 0; i < queries.size(); ++i) {
         int it = 0;
-        unsigned long long edge_updates = 0;
+        unsigned edge_updates = 0;
         auto t0 = std::chrono::high_resolution_clock::now();
 
         float flow = solve(dg, w, p, queries[i].first, queries[i].second, &it, &edge_updates);
@@ -961,7 +961,7 @@ int main(int argc, char** argv) {
         double throughput = (sec > 1e-9) ? (double)edge_updates / sec : 0.0;
 
         fprintf(of, "%d %d %.6f\n", queries[i].first, queries[i].second, flow);
-        printf("  [%zu] %d->%d  flow=%.4f  iters=%d  %.2fms  updates=%llu  %.2f M updates/s\n",
+        printf("  [%zu] %d->%d  flow=%.4f  iters=%d  %.2fms  updates=%u  %.2f M updates/s\n",
                i, queries[i].first, queries[i].second, flow, it, ms, edge_updates, throughput / 1e6);
     }
     fclose(of);
@@ -974,7 +974,7 @@ int main(int argc, char** argv) {
     printf("  Total Time   : %.3f ms\n", total_ms);
     printf("  Avg Time : %.3f ms\n", queries.empty() ? 0.0 : total_ms / queries.size());
     printf("  Iter Count   : %lld\n", total_iters);
-    printf("  Edge Updates : %llu\n", total_edge_updates);
+    printf("  Edge Updates : %u\n", total_edge_updates);
     printf("  Overall Throughput : %.2f M updates/s\n", (total_ms > 1e-9) ? (double)total_edge_updates / (total_ms / 1000.0) / 1e6 : 0.0);
 
     // 释放 GPU 资源
