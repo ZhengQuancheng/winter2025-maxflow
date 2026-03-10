@@ -972,7 +972,7 @@ int main(int argc, char** argv) {
     printf("\n========== Performance ==========\n");
     printf("  Query Count  : %zu\n",  queries.size());
     printf("  Total Time   : %.3f ms\n", total_ms);
-    printf("  Avg Time : %.3f ms\n", queries.empty() ? 0.0 : total_ms / queries.size());
+    printf("  Average Time : %.3f ms\n", queries.empty() ? 0.0 : total_ms / queries.size());
     printf("  Iter Count   : %lld\n", total_iters);
     printf("  Edge Updates : %u\n", total_edge_updates);
     printf("  Overall Throughput : %.2f M updates/s\n", (total_ms > 1e-9) ? (double)total_edge_updates / (total_ms / 1000.0) / 1e6 : 0.0);

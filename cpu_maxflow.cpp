@@ -94,7 +94,7 @@ bool load_graph_file(const char* path, GraphCSR& g) {
  * @param N 图中节点数, 用于验证查询的合法性
  * @param qs 输出参数, 成功时包含加载的查询对
  * @return 成功返回 true, 失败返回 false
- */ 
+ */
 bool load_query_file(const char* path, int N, std::vector<std::pair<int,int>>& qs) {
     std::ifstream fin(path);
     if (!fin) { std::fprintf(stderr, "Cannot open '%s': %s\n", path, strerror(errno)); return false; }
@@ -410,8 +410,8 @@ int main(int argc, char* argv[]) {
     EdmondsKarpCSR solver2(rg);
     int Q = (int)queries.size();
     std::printf("Processing %d queries...\n", Q);
-
-    auto ts = std::chrono::high_resolution_clock::now();
+    double total_time_1 = 0.0;
+    double total_time_2 = 0.0;
     for (int i = 0; i < Q; ++i) {
         auto [s, t] = queries[i];
 
@@ -419,21 +419,27 @@ int main(int argc, char* argv[]) {
         double flow1 = solver1.max_flow(s, t);
         auto qe1 = std::chrono::high_resolution_clock::now();
         double ms1 = std::chrono::duration<double, std::milli>(qe1 - qs1).count();
+        total_time_1 += ms1;
 
         auto qs2 = std::chrono::high_resolution_clock::now();
         double flow2 = solver2.max_flow(s, t);
         auto qe2 = std::chrono::high_resolution_clock::now();
         double ms2 = std::chrono::duration<double, std::milli>(qe2 - qs2).count();
+        total_time_2 += ms2;
 
         std::fprintf(ofp, "%d %d %.9f\n", s, t, flow1);
         std::printf("DC [%d] (%d -> %d)  flow=%.6f  %.3f ms\n", i, s, t, flow1, ms1);
         std::printf("EK [%d] (%d -> %d)  flow=%.6f  %.3f ms\n", i, s, t, flow2, ms2);
         if (std::abs(flow1 - flow2) > 0) {
-            std::printf("  [!] Mismatch: Dinic=%.6f vs EK=%.6f\n", flow1, flow2);
+            std::printf("  [!] Mismatch: Dinic=%.6f vs EdmondsKarp=%.6f\n", flow1, flow2);
         }
     }
-    auto te = std::chrono::high_resolution_clock::now();
-    double total = std::chrono::duration<double, std::milli>(te - ts).count();
+
+    std::printf("Total time - Dinic: %.3f ms\n", total_time_1);
+    std::printf("Total time - EdmondsKarp: %.3f ms\n", total_time_2);
+
+    std::printf("Average time - Dinic: %.3f ms\n", total_time_1 / Q);
+    std::printf("Average time - EdmondsKarp: %.3f ms\n", total_time_2 / Q);
 
     std::fclose(ofp);
 
