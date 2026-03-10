@@ -101,6 +101,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <limits>
 
 #define RUNTIME_CHECK(call) do { \
     GPUError_t _e = (call); \
@@ -347,14 +348,18 @@ __global__ void kernel_init_nodes(int V, int s, float* excess, int* height) {
  * @param excess 节点盈余流量数组, 该函数会修改源点 s 和其出边终点的 excess 值
  *               excess[u] = 流入 u 的总流量 - 流出 u 的总流量,
  *               在 preflow 初始化后, 源点 s 的 excess 将为负数, 其出边终点的 excess 将为正数.
+ * @param edge_updates 边更新次数计数器
  */
 __global__ void kernel_saturate_source(
     int s,
     const int* __restrict__ d_row,
     const int* __restrict__ d_col,
     const int* __restrict__ d_rev,
-    float* cap, float* excess)
+    float* cap, float* excess,
+    unsigned long long* edge_updates)
 {
+    // 局部边更新次数计数器, 记录当前线程执行的边更新次数 (每次成功推送都会更新两条边: 正向边和反向边)
+    unsigned long long local_edge_updates = 0;
     // 每个线程处理源点 s 的一部分出边
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -373,7 +378,13 @@ __global__ void kernel_saturate_source(
             atomicAdd(&excess[d_col[e]], c);
             // 从 excess[s] 中扣除同样的量
             atomicAdd(&excess[s], -c);
+            // 记录更新的边数
+            local_edge_updates += 2;
         }
+    }
+    // 将每个线程的更新边数累加到全局计数器 edge_updates 中
+    if (local_edge_updates > 0) {
+        atomicAdd(edge_updates, local_edge_updates);
     }
 }
 
@@ -390,6 +401,7 @@ __global__ void kernel_saturate_source(
  * @param excess 节点盈余流量数组, 该函数会修改节点 u 和其出边终点的 excess 值
  * @param height 节点高度标号数组, 该函数会修改节点 u 的 height 值
  * @param flag 设备内存中的标志位, 如果该函数对节点 u 执行了 push 或 relabel 操作, 则将 flag[0] 置为 1, 否则保持不变
+ * @param edge_updates 边更新次数计数器
  */
 __global__ void kernel_discharge(
     int V, int s, int t,
@@ -397,8 +409,12 @@ __global__ void kernel_discharge(
     const int* __restrict__ d_col,
     const int* __restrict__ d_rev,
     float* cap, float* excess,
-    int* height, int* flag)
+    int* height, int* flag,
+    unsigned long long* edge_updates)
 {
+    // 局部边更新次数计数器, 记录当前线程执行的边更新次数
+    unsigned long long local_edge_updates = 0;
+
     // 当前线程负责处理的节点编号 u
     int u = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -457,6 +473,8 @@ __global__ void kernel_discharge(
                     rem -= d;
                     // 记录本线程做过有效工作
                     work = true;
+                    // 记录更新的边数
+                    local_edge_updates += 2;
                 }
             }
 
@@ -491,6 +509,10 @@ __global__ void kernel_discharge(
     if (rem > EPS) atomicAdd(&excess[u], rem);
     // 如果本线程执行了有效工作, 设置标志位 flag[0] = 1, 以通知主机端本轮迭代有节点被处理过
     if (work)      flag[0] = 1;
+    // 将每个线程的更新边数累加到全局计数器 edge_updates 中
+    if (local_edge_updates > 0) {
+        atomicAdd(edge_updates, local_edge_updates);
+    }
 }
 
 /**
@@ -651,9 +673,10 @@ __global__ void kernel_max_excess(
  * @brief 固定内存 (Pinned Memory) 缓冲区, 存储需要频繁在 CPU 和 GPU 之间传输的小数据
  */
 struct PinnedBuffer {
-    int *flag;      // 标志位: 是否有节点执行了 push/relabel
-    int *fsz;       // BFS 前沿队列大小
-    unsigned *max_bits;   // 最大盈余的位表示
+    int *flag;          // 标志位: 是否有节点执行了 push/relabel
+    int *fsz;           // BFS 前沿队列大小
+    unsigned *max_bits; // 最大盈余的位表示
+    unsigned long long *edge_updates; // 主机端统计: 边更新次数
 };
 
 /**
@@ -666,8 +689,9 @@ struct WorkBuffer {
     int   *flag;    // 工作标志
     int   *fa, *fb; // BFS 前沿队列 A 和 B (大小 V, 双缓冲)
     int   *fsz;     // 前沿队列大小
-    unsigned *max_bits;   // 最大盈余的位表示
-    GPUStream_t stream; // CUDA 流
+    unsigned *max_bits;                 // 最大盈余的位表示
+    unsigned long long *edge_updates;   // 设备端统计: 边更新次数
+    GPUStream_t stream;                 // CUDA 流
 };
 
 static inline int grid_dim(int n) { return (n + BLK - 1) / BLK; }
@@ -735,24 +759,31 @@ void global_relabel(int V, int s, int t,
  * @param p 固定内存缓冲区
  * @param s 源点编号
  * @param t 汇点编号
- * @param out_iters 输出迭代次数 (可选)
+ * @param out_iters 输出迭代次数
  * @return 最大流量值
+ * @param out_edge_updates 输出边更新次数
  */
 float solve(const DeviceGraph& dg,
             WorkBuffer& w, PinnedBuffer& p,
-            int s, int t, int* out_iters)
+            int s, int t, int* out_iters,
+            unsigned long long* out_edge_updates)
 {
-    if (s == t) { if (out_iters) *out_iters = 0; return 0.0f; }
+    if (s == t) {
+        if (out_iters) *out_iters = 0;
+        if (out_edge_updates) *out_edge_updates = 0;
+        return 0.0f;
+    }
 
     const int V = dg.V, E = dg.E;
     GPUStream_t stream = w.stream;
-
+    // 清零边更新计数器
+    RUNTIME_CHECK(GPUMemsetAsync(w.edge_updates, 0, sizeof(unsigned long long), stream));
     // 重置残余容量 (从原始容量拷贝)
     kernel_reset_cap<<<grid_dim(E), BLK, 0, stream>>>(E, dg.d_cap, w.cap);
     // 初始化节点状态 (excess=0; height=0 except s, h[s] = V)
     kernel_init_nodes<<<grid_dim(V), BLK, 0, stream>>>(V, s, w.excess, w.height);
     // 饱和源点的所有出边
-    kernel_saturate_source<<<4, BLK, 0, stream>>>(s, dg.d_row, dg.d_col, dg.d_rev, w.cap, w.excess);
+    kernel_saturate_source<<<4, BLK, 0, stream>>>(s, dg.d_row, dg.d_col, dg.d_rev, w.cap, w.excess, w.edge_updates);
 
     // 首次全局重标号
     global_relabel(V, s, t, dg, w.cap, w.height, w.fa, w.fb, w.fsz, p.fsz, stream);
@@ -776,7 +807,7 @@ float solve(const DeviceGraph& dg,
             // 执行 discharge kernel
             kernel_discharge<<<grid_dim(V), BLK, 0, stream>>>(
                 V, s, t, dg.d_row, dg.d_col, dg.d_rev,
-                w.cap, w.excess, w.height, w.flag);
+                w.cap, w.excess, w.height, w.flag, w.edge_updates);
         }
 
         // 进度检查: 是否有节点执行了 push/relabel
@@ -814,10 +845,15 @@ float solve(const DeviceGraph& dg,
 
     // 读取最终流量并返回
     float flow;
-    RUNTIME_CHECK(GPUMemcpy(&flow, w.excess + t, sizeof(float), GPUMemcpyDeviceToHost));
+    RUNTIME_CHECK(GPUMemcpyAsync(&flow, w.excess + t, sizeof(float), GPUMemcpyDeviceToHost, stream));
+    // 读取边更新次数
+    RUNTIME_CHECK(GPUMemcpyAsync(p.edge_updates, w.edge_updates, sizeof(unsigned long long), GPUMemcpyDeviceToHost, stream));
+    // 同步 stream
+    RUNTIME_CHECK(GPUStreamSynchronize(stream));
     // 输出迭代次数
     if (out_iters) *out_iters = iters;
-
+    // 输出边更新次数
+    if (out_edge_updates) *out_edge_updates = *p.edge_updates;
     return flow;
 }
 
@@ -877,22 +913,24 @@ int main(int argc, char** argv) {
     upload_graph(rg, dg);
 
     // 分配 GPU 工作缓冲区
-    WorkBuffer w;
+    WorkBuffer w = { };
     RUNTIME_CHECK(GPUStreamCreate(&w.stream));
-    RUNTIME_CHECK(GPUMalloc(&w.cap,    rg.E * sizeof(float)));
+    RUNTIME_CHECK(GPUMalloc(&w.cap, rg.E * sizeof(float)));
     RUNTIME_CHECK(GPUMalloc(&w.excess, rg.V * sizeof(float)));
     RUNTIME_CHECK(GPUMalloc(&w.height, rg.V * sizeof(int)));
-    RUNTIME_CHECK(GPUMalloc(&w.flag,   sizeof(int)));
-    RUNTIME_CHECK(GPUMalloc(&w.fa,     rg.V * sizeof(int)));
-    RUNTIME_CHECK(GPUMalloc(&w.fb,     rg.V * sizeof(int)));
-    RUNTIME_CHECK(GPUMalloc(&w.fsz,    sizeof(int)));
-    RUNTIME_CHECK(GPUMalloc(&w.max_bits,     sizeof(unsigned)));
+    RUNTIME_CHECK(GPUMalloc(&w.flag, sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fa, rg.V * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fb, rg.V * sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.fsz, sizeof(int)));
+    RUNTIME_CHECK(GPUMalloc(&w.max_bits, sizeof(unsigned)));
+    RUNTIME_CHECK(GPUMalloc(&w.edge_updates, sizeof(unsigned long long)));
 
     // 分配主机侧 pinned memory, 用于和 GPU 异步交换少量控制信息
-    PinnedBuffer p;
+    PinnedBuffer p = { };
     RUNTIME_CHECK(GPUMallocHost(&p.flag, sizeof(int)));
-    RUNTIME_CHECK(GPUMallocHost(&p.fsz,  sizeof(int)));
-    RUNTIME_CHECK(GPUMallocHost(&p.max_bits,   sizeof(unsigned)));
+    RUNTIME_CHECK(GPUMallocHost(&p.fsz, sizeof(int)));
+    RUNTIME_CHECK(GPUMallocHost(&p.max_bits, sizeof(unsigned)));
+    RUNTIME_CHECK(GPUMallocHost(&p.edge_updates, sizeof(unsigned long long)));
 
     // 读取所有查询对
     std::vector<std::pair<int,int>> queries;
@@ -905,20 +943,26 @@ int main(int argc, char** argv) {
 
     auto T0 = std::chrono::high_resolution_clock::now();
     long long total_iters = 0;
+    unsigned long long total_edge_updates = 0;
 
     for (size_t i = 0; i < queries.size(); ++i) {
         int it = 0;
+        unsigned long long edge_updates = 0;
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        float flow = solve(dg, w, p, queries[i].first, queries[i].second, &it);
+        float flow = solve(dg, w, p, queries[i].first, queries[i].second, &it, &edge_updates);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         total_iters += it;
+        total_edge_updates += edge_updates;
+
+        double sec = ms / 1000.0;
+        double throughput = (sec > 1e-9) ? (double)edge_updates / sec : 0.0;
 
         fprintf(of, "%d %d %.6f\n", queries[i].first, queries[i].second, flow);
-        printf("  [%zu] %d->%d  flow=%.4f  iters=%d  %.2fms\n",
-               i, queries[i].first, queries[i].second, flow, it, ms);
+        printf("  [%zu] %d->%d  flow=%.4f  iters=%d  %.2fms  updates=%llu  %.2f M updates/s\n",
+               i, queries[i].first, queries[i].second, flow, it, ms, edge_updates, throughput / 1e6);
     }
     fclose(of);
 
@@ -928,8 +972,10 @@ int main(int argc, char** argv) {
     printf("\n========== Performance ==========\n");
     printf("  Query Count  : %zu\n",  queries.size());
     printf("  Total Time   : %.3f ms\n", total_ms);
-    printf("  Average Time : %.3f ms\n", queries.empty() ? 0.0 : total_ms / queries.size());
+    printf("  Avg Time : %.3f ms\n", queries.empty() ? 0.0 : total_ms / queries.size());
     printf("  Iter Count   : %lld\n", total_iters);
+    printf("  Edge Updates : %llu\n", total_edge_updates);
+    printf("  Overall Throughput : %.2f M updates/s\n", (total_ms > 1e-9) ? (double)total_edge_updates / (total_ms / 1000.0) / 1e6 : 0.0);
 
     // 释放 GPU 资源
     RUNTIME_CHECK(GPUFree(w.cap));
@@ -940,12 +986,13 @@ int main(int argc, char** argv) {
     RUNTIME_CHECK(GPUFree(w.fb));
     RUNTIME_CHECK(GPUFree(w.fsz));
     RUNTIME_CHECK(GPUFree(w.max_bits));
+    RUNTIME_CHECK(GPUFree(w.edge_updates));
+    RUNTIME_CHECK(GPUStreamDestroy(w.stream));
 
     RUNTIME_CHECK(GPUFreeHost(p.flag));
     RUNTIME_CHECK(GPUFreeHost(p.fsz));
     RUNTIME_CHECK(GPUFreeHost(p.max_bits));
-
-    RUNTIME_CHECK(GPUStreamDestroy(w.stream));
+    RUNTIME_CHECK(GPUFreeHost(p.edge_updates));
 
     RUNTIME_CHECK(GPUFree(dg.d_row));
     RUNTIME_CHECK(GPUFree(dg.d_col));
