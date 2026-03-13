@@ -1,6 +1,7 @@
 // Usage: ./gpu_maxflow <graph.bin> <query.txt> <output.txt>
 
 #if defined(PLATFORM_NVIDIA) || defined(PLATFORM_ILUVATAR)
+
 #include <cuda_runtime.h>
 #define GPUError_t cudaError_t
 #define GPUSuccess cudaSuccess
@@ -22,6 +23,7 @@
 #define GPUDeviceProp cudaDeviceProp
 
 #elif defined(PLATFORM_METAX)
+
 #include <mc_runtime.h>
 #define GPUError_t mcError_t
 #define GPUSuccess mcSuccess
@@ -43,6 +45,7 @@
 #define GPUDeviceProp mcDeviceProp_t
 
 #elif defined(PLATFORM_MOORE)
+
 #include <musa_runtime.h>
 #define GPUError_t musaError_t
 #define GPUSuccess musaSuccess
@@ -64,6 +67,7 @@
 #define GPUDeviceProp musaDeviceProp
 
 #elif defined(PLATFORM_HYGON)
+
 #include <hip/hip_runtime.h>
 #define GPUError_t hipError_t
 #define GPUSuccess hipSuccess
@@ -86,22 +90,24 @@
 
 #else
 
+#error "Unknown PLATFORM"
+
 #endif
 
-#include <cstdint>
+#include <cmath>
 #include <cstdio>
+#include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <cerrno>
 #include <cassert>
-#include <cmath>
 #include <vector>
-#include <algorithm>
 #include <string>
-#include <fstream>
-#include <sstream>
 #include <chrono>
 #include <limits>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
 
 #define RUNTIME_CHECK(call) do { \
     GPUError_t _e = (call); \

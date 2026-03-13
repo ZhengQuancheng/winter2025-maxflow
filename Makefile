@@ -48,13 +48,13 @@ define run_test
 endef
 
 test_small: all
-	$(call run_test,small,100,1000,1,10)
+	$(call run_test,small,200,2000,1,10)
 
 test_medium: all
-	$(call run_test,medium,10000,100000,2,10)
+	$(call run_test,medium,20000,200000,2,50)
 
 test_large: all
-	$(call run_test,large,100000,1000000,3,100)
+	$(call run_test,large,200000,2000000,3,100)
 
 test: test_small test_medium test_large
 
